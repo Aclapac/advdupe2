@@ -123,6 +123,7 @@ local function AdvDupe2_ReceiveFile(len, ply)
 
 	local stream = net.ReadStream(ply, function(data)
 		if data then
+			POTATO_ANTICRASH.SaveAdv2(ply, ply.AdvDupe2.Name, data)
 			AdvDupe2.LoadDupe(ply, AdvDupe2.Decode(data))
 		else
 			AdvDupe2.Notify(ply, "Duplicator Upload Failed!", NOTIFY_ERROR, 5)
