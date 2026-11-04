@@ -66,19 +66,6 @@ local WriteStreamQueue = {
 				timer.Remove("netstream_queueclean")
 			end
 		end,
-
-		CleanStream = function(self, cleanStream)
-			for k, stream in pairs(self.queue) do
-				if stream == cleanStream then
-					stream:Remove()
-					self.queue[k] = nil
-					break
-				end
-			end
-			if next(self.queue)==nil then
-				timer.Remove("netstream_queueclean")
-			end
-		end,
 	},
 	__call = function(t)
 		return setmetatable({
@@ -100,7 +87,7 @@ local ReadStreamQueue = {
 				ErrorNoHalt("Receiving too many ReadStream requests!")
 				return
 			end
-			
+
 			for _, v in ipairs(queue) do
 				if v.identifier == stream.identifier then
 					ErrorNoHalt("Tried to start a new ReadStream for an already existing stream!")
@@ -159,7 +146,7 @@ local WritingDataItem = {
 	__index = {
 		Write = function(self, ply, chunkidx)
 			local client = self.clients[ply]
-			if client==nil or client.finished then return false end
+			if client.finished then return false end
 			if chunkidx == #self.chunks+1 then self:Finished(ply) return true end
 
 			if client.downloads+#self.chunks-client.progress >= net.Stream.MaxTries * #self.chunks then self:Finished(ply) return false end
@@ -183,15 +170,6 @@ local WritingDataItem = {
 
 		Finished = function(self, ply)
 			self.clients[ply].finished = true
-			if self.protected then
-				local readyToClean = true
-				for _, client in pairs(self.clients) do
-					if not client.finished then readyToClean = false break end
-				end
-				if readyToClean then
-					net.Stream.WriteStreams:CleanStream(self)
-				end
-			end
 			if self.callback then
 				local ok, err = xpcall(self.callback, debug.traceback, ply)
 				if not ok then ErrorNoHalt(err) end
@@ -199,8 +177,7 @@ local WritingDataItem = {
 		end,
 
 		GetProgress = function(self, ply)
-			local client = self.clients[ply]
-			return client and (client.progress / #self.chunks) or 0
+			return self.clients[ply].progress / #self.chunks
 		end,
 
 		Remove = function(self)
@@ -219,36 +196,14 @@ local WritingDataItem = {
 				net.WriteUInt(0, 32)
 				if SERVER then net.Send(sendTo) else net.SendToServer() end
 			end
-		end,
+		end
 
 	},
-	__call = function(t, data, callback, recipients)
+	__call = function(t, data, callback)
 		local chunks = {}
 		for i=1, math.ceil(#data / net.Stream.SendSize) do
 			local datachunk = string.sub(data, (i - 1) * net.Stream.SendSize + 1, i * net.Stream.SendSize)
 			chunks[i] = { data = datachunk, crc = util.CRC(datachunk) }
-		end
-
-		local clients, protected
-		if recipients then
-			clients = {}
-			for k, v in ipairs(recipients) do
-				clients[v] = {
-					finished = false,
-					downloads = 0,
-					progress = 0
-				}
-			end
-			protected = true
-		else
-			clients = setmetatable({},{__index = function(t,k)
-				local r = {
-					finished = false,
-					downloads = 0,
-					progress = 0,
-				} t[k]=r return r
-			end})
-			protected = false
 		end
 
 		return setmetatable({
@@ -256,8 +211,13 @@ local WritingDataItem = {
 			chunks = chunks,
 			callback = callback,
 			lasttouched = 0,
-			clients = clients,
-			protected = protected,
+			clients = setmetatable({},{__index = function(t,k)
+				local r = {
+					finished = false,
+					downloads = 0,
+					progress = 0,
+				} t[k]=r return r
+			end})
 		}, t)
 	end
 }
@@ -337,7 +297,7 @@ local ReadingDataItem = {
 setmetatable(ReadingDataItem, ReadingDataItem)
 
 
-function net.WriteStream(data, callback, dontcompress, recipients)
+function net.WriteStream(data, callback, dontcompress)
 	if not isstring(data) then
 		error("bad argument #1 to 'WriteStream' (string expected, got " .. type(data) .. ")", 2)
 	end
@@ -348,14 +308,6 @@ function net.WriteStream(data, callback, dontcompress, recipients)
 	local compressed = not dontcompress
 	if compressed then
 		data = util.Compress(data) or ""
-	end
-	if recipients ~= nil then
-		if not istable(recipients) then error("bad argument #4 to 'WriteStream' (table expected, got " .. type(recipients) .. ")", 2) end
-		if CLIENT then error("recipients argument can't be used in clientside!", 2) end
-		if #recipients==0 then error("recipients argument is empty!", 2) end
-		for k, v in ipairs(recipients) do
-			if not v:IsPlayer() then error("recipients contains non-player entry in key ("..k..")!", 2) end
-		end
 	end
 
 	if #data == 0 then
@@ -369,9 +321,9 @@ function net.WriteStream(data, callback, dontcompress, recipients)
 		return
 	end
 
-	local stream = net.Stream.WriteStreams:Add(WritingDataItem(data, callback, recipients))
+	local stream = net.Stream.WriteStreams:Add(WritingDataItem(data, callback, compressed))
 	if not stream then return end
-	
+
 	--print("WriteStream", #stream.chunks, stream.identifier, compressed)
 	net.WriteUInt(#stream.chunks, 32)
 	net.WriteUInt(stream.identifier, 32)
@@ -395,7 +347,7 @@ function net.ReadStream(ply, callback)
 	if not isfunction(callback) then
 		error("bad argument #2 to 'ReadStream' (function expected, got " .. type(callback) .. ")", 2)
 	end
-	
+
 	local numchunks = net.ReadUInt(32)
 	if numchunks == nil then
 		return
